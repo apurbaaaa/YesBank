@@ -3,90 +3,100 @@ import pandas as pd
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+from statsmodels.tsa.arima.model import ARIMAResults, ARIMAResultsWrapper  # Ensure compatibility
 
 # ================================
-# 🔹 Load the trained XGBoost model
+# 🔹 Load ARIMA model from `.sav`
 # ================================
-model_filename = 'best_xgb_model.pkl'  # Ensure this is the correct model filename
-with open(model_filename, 'rb') as file:
-    loaded_xgb = pickle.load(file)
+model_filename = 'best_arima_1.sav'  # ✅ Using .sav format
+
+@st.cache_resource
+def load_model():
+    try:
+        with open(model_filename, 'rb') as file:
+            model = pickle.load(file)  # ✅ Load model
+
+        # ✅ Convert ARIMAResultsWrapper to ARIMAResults
+        if isinstance(model, ARIMAResultsWrapper):  
+            model = model._results  # Extract the actual ARIMAResults
+
+        st.write(f"✅ Model Loaded Type (after conversion): {type(model)}")  # Debugging output
+
+        if not isinstance(model, ARIMAResults):
+            st.error(f"❌ Incorrect model type: {type(model)}. Expected ARIMAResults.")
+            st.stop()
+
+        return model
+    except FileNotFoundError:
+        st.error("❌ Model file not found. Ensure 'best_arima.sav' exists in the directory.")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Error loading model: {e}")
+        st.stop()
+
+# Load model
+loaded_arima = load_model()
 
 # ================================
 # 🔹 Load stock dataset
 # ================================
 df = pd.read_csv("data_YesBank_StockPrices.csv", parse_dates=["Date"], index_col="Date")
+df.index = pd.to_datetime(df.index, errors='coerce')  # Ensure DateTime format
+df = df[df.index.notna()]  # Remove NaT values
 
-# Ensure DateTime Index is properly formatted
-df.index = pd.to_datetime(df.index, errors='coerce')  # Convert index to datetime
-df = df[df.index.notna()]  # Remove NaT (invalid timestamps)
-
-# Handle cases where the last date is missing or too old
-if df.index.empty or pd.isnull(df.index[-1]) or df.index[-1].year < 2000:
-    last_valid_date = pd.Timestamp("2023-12-31")  # Default to recent date if missing
+# Handle missing or incorrect last date
+if df.index.empty or pd.isnull(df.index[-1]):
+    last_valid_date = pd.Timestamp("2023-12-31")  # Default fallback
 else:
     last_valid_date = df.index[-1]
 
 # ================================
-# 🔹 Define trained features
-# ================================
-trained_features = ['Avg_Price', 'Range', 'Prev_Close_1', 'Prev_Close_3', 'Prev_Close_6']
-
-# ================================
 # 🔹 Streamlit UI
 # ================================
-st.title("📈 Stock Price Prediction App")
-st.write("This app predicts the future closing prices of a stock using a trained XGBoost model.")
+st.title("📈 ARIMA Stock Price Prediction App")
+st.write("This app predicts future stock closing prices using an ARIMA model.")
 
-# User input: Number of months to predict
-future_steps = st.slider("Select the number of months to predict", min_value=1, max_value=24, value=12)
-
-# ================================
-# 🔹 Generate Future Data
-# ================================
-future_dates = pd.date_range(start=last_valid_date, periods=future_steps+1, freq='ME')[1:]
-
-# Create DataFrame for future predictions
-unseen_df = pd.DataFrame(index=future_dates, columns=trained_features)
-
-# Copy last known values for features
-for col in trained_features:
-    if col in df.columns:
-        unseen_df[col] = df[col].iloc[-1]  # Use last known values
-
-# Fill missing values
-unseen_df.fillna(0, inplace=True)
+# User selects the number of months to predict
+future_steps = st.slider("Select months to predict", min_value=1, max_value=24, value=12)
 
 # ================================
-# 🔹 Predict Future Prices (Recursive Forecasting)
+# 🔹 Generate Future Dates
 # ================================
-predictions = []
-for date in future_dates:
-    # Ensure only trained features are passed
-    input_features = unseen_df.loc[[date], trained_features]
-
-    # Predict closing price
-    pred = loaded_xgb.predict(input_features)[0]
-    predictions.append(pred)
-
-    # Update 'Prev_Close_1' for next prediction
-    if 'Prev_Close_1' in unseen_df.columns:
-        unseen_df.loc[date, 'Prev_Close_1'] = pred
-
-# Store predictions in the DataFrame
-unseen_df['XGB_Predicted_Close'] = predictions
+future_dates = pd.date_range(start=last_valid_date, periods=future_steps, freq='M')
 
 # ================================
-# 🔹 Display Results in Streamlit
+# 🔹 Predict Future Prices
+# ================================
+try:
+    # ✅ Make prediction (Removed .fit())
+    predictions = loaded_arima.predict(start=len(df), end=len(df) + future_steps - 1)
+
+    # Handle NaN values in predictions
+    if predictions.isna().any():
+        st.error("❌ ARIMA model returned NaN values. Ensure the model was trained correctly.")
+        st.stop()
+
+except Exception as e:
+    st.error(f"❌ Error during forecasting: {e}")
+    st.stop()
+
+# Store predictions in DataFrame
+results_df = pd.DataFrame({'Date': future_dates, 'ARIMA_Predicted_Close': predictions.values})
+results_df.set_index('Date', inplace=True)
+
+# ================================
+# 🔹 Display Predictions in Streamlit
 # ================================
 st.subheader("📊 Predicted Stock Prices")
-st.dataframe(unseen_df[['XGB_Predicted_Close']])
+st.dataframe(results_df)
 
 # ================================
 # 🔹 Plot Predictions
 # ================================
 fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(future_dates, predictions, marker='o', linestyle='-', color='red', label="Predicted Close Price")
-ax.set_title("Future Stock Price Predictions")
+ax.plot(future_dates, predictions, marker='o', linestyle='-', color='blue', label="ARIMA Predicted Close")
+ax.set_title("ARIMA Future Stock Price Predictions")
 ax.set_xlabel("Date")
 ax.set_ylabel("Predicted Closing Price")
 ax.legend()
@@ -94,5 +104,4 @@ ax.grid(True)
 
 # Show plot in Streamlit
 st.pyplot(fig)
-
 st.success("✅ Prediction completed! Adjust parameters to explore more.")
